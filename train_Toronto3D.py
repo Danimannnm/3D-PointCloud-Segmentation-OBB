@@ -24,6 +24,9 @@
 # Common libs
 import signal
 import os
+import sys
+import time
+import multiprocessing as mp
 
 # Dataset
 from datasets.Toronto3D import *
@@ -195,6 +198,12 @@ if __name__ == '__main__':
 
     start = time.time()
 
+    # On Windows, use spawn and avoid excessive workers
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
+
     # Set which gpu is going to be used
     GPU_ID = '0'
 
@@ -252,23 +261,41 @@ if __name__ == '__main__':
     training_sampler = Toronto3DSampler(training_dataset)
     test_sampler = Toronto3DSampler(test_dataset)
 
-    # Initialize the dataloader
+    # Create light-weight loaders for calibration (Windows-friendly)
+    calib_train_loader = DataLoader(training_dataset,
+                                    batch_size=1,
+                                    sampler=training_sampler,
+                                    collate_fn=Toronto3DCollate,
+                                    num_workers=0,
+                                    pin_memory=False)
+    calib_val_loader = DataLoader(test_dataset,
+                                  batch_size=1,
+                                  sampler=test_sampler,
+                                  collate_fn=Toronto3DCollate,
+                                  num_workers=0,
+                                  pin_memory=False)
+
+    # Calibrate samplers with single-worker loaders to avoid Windows spawn issues
+    training_sampler.calibration(calib_train_loader, verbose=True)
+    test_sampler.calibration(calib_val_loader, verbose=True)
+
+    # Determine a safe number of workers for main loaders
+    cpu_cnt = os.cpu_count() or 4
+    safe_workers = min(config.input_threads, max(1, min(8, cpu_cnt - 1)))
+
+    # Initialize the dataloaders for training/validation
     training_loader = DataLoader(training_dataset,
                                  batch_size=1,
                                  sampler=training_sampler,
                                  collate_fn=Toronto3DCollate,
-                                 num_workers=config.input_threads,
+                                 num_workers=safe_workers,
                                  pin_memory=True)
     test_loader = DataLoader(test_dataset,
                              batch_size=1,
                              sampler=test_sampler,
                              collate_fn=Toronto3DCollate,
-                             num_workers=config.input_threads,
+                             num_workers=safe_workers,
                              pin_memory=True)
-
-    # Calibrate samplers
-    training_sampler.calibration(training_loader, verbose=True)
-    test_sampler.calibration(test_loader, verbose=True)
 
     # Optional debug functions
     # debug_timing(training_dataset, training_loader)
