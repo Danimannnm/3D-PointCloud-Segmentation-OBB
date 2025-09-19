@@ -670,7 +670,10 @@ class Toronto3DDataset(PointCloudDataset):
             pc = read_ply(join(self.path, 'original_ply/' + cloud_name + '.ply'))
             xyz = np.vstack((pc['x'] - self.UTM_OFFSET[0], pc['y'] - self.UTM_OFFSET[1], pc['z'] - self.UTM_OFFSET[2])).T.astype(np.float32)
             color = np.vstack((pc['red'], pc['green'], pc['blue'])).T.astype(np.uint8)
-            intensity = pc['scalar_Intensity'].astype(np.uint8)
+            intensity_vals = pc['scalar_Intensity']
+            # Sanitize intensity: replace NaNs/Infs, clip to [0, 255], cast to uint8
+            intensity = np.nan_to_num(intensity_vals, nan=0.0, posinf=255.0, neginf=0.0)
+            intensity = np.clip(intensity, 0, 255).astype(np.uint8)
             rgbi = np.hstack((color, intensity.reshape(-1, 1)))
             labels = pc['scalar_Label'].astype(np.uint8)
 
@@ -1379,7 +1382,8 @@ class Toronto3DCustomBatch:
         ind += L
         self.features = torch.from_numpy(input_list[ind])
         ind += 1
-        self.labels = torch.from_numpy(input_list[ind])
+        # Ensure labels are torch.int64 for PyTorch CrossEntropyLoss
+        self.labels = torch.from_numpy(input_list[ind]).long()
         ind += 1
         self.scales = torch.from_numpy(input_list[ind])
         ind += 1
