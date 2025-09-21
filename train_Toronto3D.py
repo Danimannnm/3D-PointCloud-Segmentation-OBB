@@ -217,7 +217,7 @@ if __name__ == '__main__':
     # Choose here if you want to start training from a previous snapshot (None for new training)
     # --- RESUME SETTINGS ---
 
-    previous_training_path = 'Log_2025-09-20_16-14-10'   # just the folder name under results/
+    previous_training_path = 'Log_2025-09-20_18-06-12'   # just the folder name under results/
     chkp_idx = None
 
     if previous_training_path:

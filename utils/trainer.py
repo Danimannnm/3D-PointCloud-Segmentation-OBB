@@ -25,6 +25,8 @@
 # Basic libs
 import torch
 import torch.nn as nn
+from torch.amp import autocast, GradScaler
+
 import numpy as np
 import pickle
 import os
@@ -156,6 +158,8 @@ class ModelTrainer:
         last_display = time.time()
         mean_dt = np.zeros(1)
 
+        scaler = GradScaler('cuda')
+
         # Start training loop
         for epoch in range(config.max_epoch):
 
@@ -182,26 +186,32 @@ class ModelTrainer:
                     batch.to(self.device)
 
                 # zero the parameter gradients
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)
 
-                # Forward pass
-                outputs = net(batch, config)
-                loss = net.loss(outputs, batch.labels)
-                acc = net.accuracy(outputs, batch.labels)
+
+                # ------- AMP forward + loss -------
+                with autocast('cuda'):
+                    outputs = net(batch, config)
+                    loss = net.loss(outputs, batch.labels)
+                    acc = net.accuracy(outputs, batch.labels)
+                # ----------------------------------
 
                 t += [time.time()]
 
-                # Backward + optimize
-                loss.backward()
+                # ------- AMP backward + step -------
+                scaler.scale(loss).backward()
 
                 if config.grad_clip_norm > 0:
-                    #torch.nn.utils.clip_grad_norm_(net.parameters(), config.grad_clip_norm)
                     torch.nn.utils.clip_grad_value_(net.parameters(), config.grad_clip_norm)
-                self.optimizer.step()
 
-                
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize(self.device)
+                scaler.step(self.optimizer)
+                scaler.update()
+                # -----------------------------------
+
+                if 'cuda' in self.device.type:
+                    torch.cuda.synchronize(self.device)
+                    # (optional) clearing every step can slow you down; keep only if you saw OOMs
+                    # torch.cuda.empty_cache()
 
                 t += [time.time()]
 
