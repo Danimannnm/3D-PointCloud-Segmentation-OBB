@@ -62,7 +62,7 @@ class Toronto3DConfig(Config):
     dataset_task = ''
 
     # Number of CPU threads for the input pipeline
-    input_threads = 6
+    input_threads = 20
 
     #########################
     # Architecture definition
@@ -215,24 +215,25 @@ if __name__ == '__main__':
     ###############
 
     # Choose here if you want to start training from a previous snapshot (None for new training)
-    # --- RESUME SETTINGS ---
+    previous_training_path = ''
 
-    previous_training_path = 'Log_2025-09-20_18-06-12'   # just the folder name under results/
+    # Choose index of checkpoint to start from. If None, uses the latest chkp
     chkp_idx = None
-
     if previous_training_path:
-        # 1) where checkpoints live
-        chkp_path = os.path.join('results', previous_training_path, 'checkpoints')
-        chkps = [f for f in os.listdir(chkp_path) if f[:4] == 'chkp' or f.endswith('.tar')]
 
-        # 2) which checkpoint filename
-        chosen_name = 'current_chkp.tar' if chkp_idx is None else np.sort(chkps)[chkp_idx]
+        # Find all snapshot in the chosen training folder
+        chkp_path = os.path.join('results/Toronto3D', previous_training_path, 'checkpoints')
+        chkps = [f for f in os.listdir(chkp_path) if f[:4] == 'chkp']
 
-        # 3) full checkpoint path (NO Toronto3D here)
-        chosen_chkp = os.path.join('results', previous_training_path, 'checkpoints', chosen_name)
+        # Find which snapshot to restore
+        if chkp_idx is None:
+            chosen_chkp = 'current_chkp.tar'
+        else:
+            chosen_chkp = np.sort(chkps)[chkp_idx]
+        chosen_chkp = os.path.join('results/Toronto3D', previous_training_path, 'checkpoints', chosen_chkp)
+
     else:
         chosen_chkp = None
-
 
     ##############
     # Prepare Data
@@ -245,7 +246,7 @@ if __name__ == '__main__':
     # Initialize configuration class
     config = Toronto3DConfig()
     if previous_training_path:
-        config.load(os.path.join('results', previous_training_path))
+        config.load(os.path.join('results/Toronto3D', previous_training_path))
         config.saving_path = None
 
     # Get path from argument if given
@@ -266,15 +267,13 @@ if __name__ == '__main__':
                                     sampler=training_sampler,
                                     collate_fn=Toronto3DCollate,
                                     num_workers=0,
-                                    pin_memory=False,
-                                    persistent_workers=False)
+                                    pin_memory=False)
     calib_val_loader = DataLoader(test_dataset,
                                   batch_size=1,
                                   sampler=test_sampler,
                                   collate_fn=Toronto3DCollate,
                                   num_workers=0,
-                                  pin_memory=False,
-                                  persistent_workers=False)
+                                  pin_memory=False)
 
     # Calibrate samplers with single-worker loaders to avoid Windows spawn issues
     training_sampler.calibration(calib_train_loader, verbose=True)
@@ -289,16 +288,14 @@ if __name__ == '__main__':
                                  batch_size=1,
                                  sampler=training_sampler,
                                  collate_fn=Toronto3DCollate,
-                                 num_workers=0,
-                                 pin_memory=False,
-                                 persistent_workers=False)
+                                 num_workers=safe_workers,
+                                 pin_memory=True)
     test_loader = DataLoader(test_dataset,
                              batch_size=1,
                              sampler=test_sampler,
                              collate_fn=Toronto3DCollate,
-                             num_workers=0,
-                             pin_memory=False,
-                             persistent_workers=False)
+                             num_workers=safe_workers,
+                             pin_memory=True)
 
     # Optional debug functions
     # debug_timing(training_dataset, training_loader)
