@@ -128,6 +128,10 @@ def main():
                         help="What to display as base: full scene ('all'), only pole points ('poles'), disable base ('none'), or voxel subsample ('subsample')")
     parser.add_argument('--voxel', type=float, default=0.10, help='Voxel size (m) for base subsampling when show_base=subsample')
     parser.add_argument('--max_view_points', type=int, default=1000000, help='Cap on number of points sent to Open3D per cloud')
+    parser.add_argument('--no_obb', action='store_true', help='Skip OBB computation and export (just highlight poles)')
+    parser.add_argument('--cylinder_mesh', action='store_true', help='Approximate each pole cluster with a vertical cylinder mesh in visualization')
+    parser.add_argument('--cyl_radius', type=float, default=0.15, help='Cylinder radius approximation (meters)')
+    parser.add_argument('--cyl_segments', type=int, default=16, help='Number of radial segments for cylinder mesh')
     args = parser.parse_args()
 
     # Resolve probability file path
@@ -197,34 +201,38 @@ def main():
     except Exception as e:
         print(f'Could not save cluster PLY: {e}')
 
-    # Compute OBBs
     obbs = []
-    for cid in np.unique(labels[valid]):
-        pts = pole_pts[labels == cid]
-        if pts.shape[0] < args.min_points:
-            continue
-        c, ext, R = pca_obb(pts)
-        obbs.append({
-            'id': int(cid),
-            'center': c.tolist(),
-            'extents': ext.tolist(),
-            'R': R.tolist(),
-            'num_points': int(pts.shape[0])
-        })
-    print(f'OBBs computed: {len(obbs)} clusters kept (min_points={args.min_points})')
+    if not args.no_obb:
+        # Compute OBBs
+        for cid in np.unique(labels[valid]):
+            pts = pole_pts[labels == cid]
+            if pts.shape[0] < args.min_points:
+                continue
+            c, ext, R = pca_obb(pts)
+            obbs.append({
+                'id': int(cid),
+                'center': c.tolist(),
+                'extents': ext.tolist(),
+                'R': R.tolist(),
+                'num_points': int(pts.shape[0])
+            })
+        print(f'OBBs computed: {len(obbs)} clusters kept (min_points={args.min_points})')
+    else:
+        print('Skipping OBB computation (--no_obb).')
 
-    # Save OBB JSON
-    obb_json = join(args.test_log, 'poles_obb_L002.json')
-    save_obb_json(obb_json, obbs)
-    print(f'OBB JSON saved: {obb_json}')
+    if not args.no_obb:
+        # Save OBB JSON
+        obb_json = join(args.test_log, 'poles_obb_L002.json')
+        save_obb_json(obb_json, obbs)
+        print(f'OBB JSON saved: {obb_json}')
 
-    # Save OBB mesh
-    obb_mesh = join(args.test_log, 'poles_obb_L002.ply')
-    try:
-        save_obb_mesh_ply(obb_mesh, obbs)
-        print(f'OBB mesh saved: {obb_mesh}')
-    except Exception as e:
-        print(f'Could not save OBB mesh PLY: {e}')
+        # Save OBB mesh
+        obb_mesh = join(args.test_log, 'poles_obb_L002.ply')
+        try:
+            save_obb_mesh_ply(obb_mesh, obbs)
+            print(f'OBB mesh saved: {obb_mesh}')
+        except Exception as e:
+            print(f'Could not save OBB mesh PLY: {e}')
 
     # Optional visualization
     if args.show:
@@ -271,22 +279,40 @@ def main():
         pc.colors = o3d.utility.Vector3dVector(cols)
         geoms.append(pc)
 
-        # OBB line sets
-        edges = np.array([
-            [0,1],[0,2],[0,4],[1,3],[1,5],[2,3],[2,6],[3,7],[4,5],[4,6],[5,7],[6,7]
-        ], dtype=np.int32)
-        for obb in obbs:
-            c = np.array(obb['center'])
-            ext = np.array(obb['extents'])
-            R = np.array(obb['R'])
-            box = o3d.geometry.OrientedBoundingBox(center=c, R=R, extent=ext)
-            pts = np.asarray(box.get_box_points())
-            ls = o3d.geometry.LineSet(
-                points=o3d.utility.Vector3dVector(pts),
-                lines=o3d.utility.Vector2iVector(edges)
-            )
-            ls.colors = o3d.utility.Vector3dVector(np.tile(np.array([[0.1, 0.9, 0.1]]), (edges.shape[0], 1)))
-            geoms.append(ls)
+        if not args.no_obb:
+            # OBB line sets
+            edges = np.array([
+                [0,1],[0,2],[0,4],[1,3],[1,5],[2,3],[2,6],[3,7],[4,5],[4,6],[5,7],[6,7]
+            ], dtype=np.int32)
+            for obb in obbs:
+                c = np.array(obb['center'])
+                ext = np.array(obb['extents'])
+                R = np.array(obb['R'])
+                box = o3d.geometry.OrientedBoundingBox(center=c, R=R, extent=ext)
+                pts = np.asarray(box.get_box_points())
+                ls = o3d.geometry.LineSet(
+                    points=o3d.utility.Vector3dVector(pts),
+                    lines=o3d.utility.Vector2iVector(edges)
+                )
+                ls.colors = o3d.utility.Vector3dVector(np.tile(np.array([[0.1, 0.9, 0.1]]), (edges.shape[0], 1)))
+                geoms.append(ls)
+
+        if args.cylinder_mesh:
+            # Approximate each cluster as vertical cylinder based on PCA vertical extent
+            for cid in np.unique(labels[valid]):
+                pts = pole_pts[labels == cid]
+                if pts.shape[0] < args.min_points:
+                    continue
+                # Height from z-range
+                zmin, zmax = pts[:,2].min(), pts[:,2].max()
+                h = zmax - zmin
+                if h <= 0:
+                    continue
+                center = np.array([pts[:,0].mean(), pts[:,1].mean(), 0.5*(zmin+zmax)])
+                mesh = o3d.geometry.TriangleMesh.create_cylinder(radius=args.cyl_radius, height=h, resolution=args.cyl_segments, split=1)
+                mesh.translate(center - np.array([0,0,h/2]))
+                mesh.paint_uniform_color([0.1,0.6,1.0])
+                geoms.append(mesh)
         o3d.visualization.draw(geoms)
 
 
