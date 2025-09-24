@@ -113,6 +113,7 @@ if __name__ == '__main__':
     parser.add_argument('--workers', type=int, default=0, help='Number of DataLoader workers (Windows-safe <=1 recommended)')
     parser.add_argument('--gpu', type=str, default='0', help='CUDA_VISIBLE_DEVICES id')
     parser.add_argument('--num_votes', type=int, default=20, help='Number of votes/passes during testing smoothing')
+    parser.add_argument('--val_size', type=int, default=None, help='Override config.validation_size (batches)')
     parser.add_argument('--verbose_calib', action='store_true', help='Verbose sampler calibration logging')
     args = parser.parse_args()
 
@@ -173,7 +174,7 @@ if __name__ == '__main__':
     #config.augment_symmetries = False
     #config.batch_num = 3
     #config.in_radius = 4
-    config.validation_size = 200
+    config.validation_size = args.val_size if args.val_size is not None else 200
     # Windows-friendly: keep workers low
     config.input_threads = max(0, min(args.workers, 2))
     # Ensure saving path is consistent for tester outputs

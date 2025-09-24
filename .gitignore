@@ -20,6 +20,11 @@ __pycache__/
 .venv
 *.venv
 /.venv
+venv_view311/
+venv_view311
+/venv_view311/
+/venv_view311
+*venv_view311
 
 /Toronto_3D
 
