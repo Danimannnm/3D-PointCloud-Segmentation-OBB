@@ -123,7 +123,7 @@ def save_obb_mesh_ply(path, obbs):
     write_ply(path, [verts], ['x','y','z'], triangular_faces=faces)
 
 
-def launch_interactive_viewer(args, xyz, pole_pts, labels, kept_points, kept_labels, obbs, min_points_keep):
+def launch_interactive_viewer(args, xyz, pole_pts, labels, kept_points, kept_labels, obbs, min_points_keep, cluster_stats):
     if not HAS_O3D_GUI:
         print('Open3D GUI modules not available. Install a full Open3D build (pip install open3d).')
         return
@@ -145,7 +145,18 @@ def launch_interactive_viewer(args, xyz, pole_pts, labels, kept_points, kept_lab
     scene_widget.scene.set_background(bg_rgba)
 
     # Print quick instruction for users; FLY controls remain default.
-    print('Interactive viewer controls: FLY navigation (WASD + mouse). Press R to level camera to world-up.')
+    print('Interactive viewer controls: FLY navigation (WASD + mouse). Press R to level camera, H to toggle stats panel.')
+    info_panel = gui.Vert(6, gui.Margins(10, 10, 10, 10))
+    info_panel.visible = True
+    window.add_child(info_panel)
+
+    info_title = gui.Label('Cluster stats')
+    info_panel.add_child(info_title)
+    info_text = gui.Label('Click a cluster to view details.')
+    info_panel.add_child(info_text)
+    info_hint = gui.Label('Hotkeys: R level, H toggle stats')
+    info_panel.add_child(info_hint)
+
     def make_point_material():
         mat = rendering.MaterialRecord()
         mat.shader = 'defaultUnlit'
@@ -163,6 +174,14 @@ def launch_interactive_viewer(args, xyz, pole_pts, labels, kept_points, kept_lab
         mat.shader = 'defaultLit'
         mat.base_color = (*color, 1.0)
         return mat
+
+    highlight_point_material = rendering.MaterialRecord()
+    highlight_point_material.shader = 'defaultUnlit'
+    highlight_point_material.point_size = max(2.0, float(args.point_size) * 1.6)
+
+    highlight_line_material = rendering.MaterialRecord()
+    highlight_line_material.shader = 'unlitLine'
+    highlight_line_material.line_width = 3.0
 
     bbox = None
 
@@ -215,11 +234,12 @@ def launch_interactive_viewer(args, xyz, pole_pts, labels, kept_points, kept_lab
         scene_widget.scene.add_geometry('pole_clusters', cluster_pc, make_point_material())
         accumulate_bbox(cluster_pc)
 
+    obb_edges = np.array([
+        [0, 1], [0, 2], [0, 4], [1, 3], [1, 5], [2, 3], [2, 6], [3, 7], [4, 5], [4, 6], [5, 7], [6, 7]
+    ], dtype=np.int32)
+
     # OBB lines
     if not args.no_obb:
-        edges = np.array([
-            [0, 1], [0, 2], [0, 4], [1, 3], [1, 5], [2, 3], [2, 6], [3, 7], [4, 5], [4, 6], [5, 7], [6, 7]
-        ], dtype=np.int32)
         for obb in obbs:
             c = np.array(obb['center'])
             ext = np.array(obb['extents'])
@@ -228,9 +248,9 @@ def launch_interactive_viewer(args, xyz, pole_pts, labels, kept_points, kept_lab
             pts = np.asarray(box.get_box_points())
             ls = o3d.geometry.LineSet(
                 points=o3d.utility.Vector3dVector(pts),
-                lines=o3d.utility.Vector2iVector(edges)
+                lines=o3d.utility.Vector2iVector(obb_edges)
             )
-            ls.colors = o3d.utility.Vector3dVector(np.tile(np.array([[0.1, 0.9, 0.1]]), (edges.shape[0], 1)))
+            ls.colors = o3d.utility.Vector3dVector(np.tile(np.array([[0.1, 0.9, 0.1]]), (obb_edges.shape[0], 1)))
             scene_widget.scene.add_geometry(f"obb_{int(obb['id'])}", ls, make_line_material())
             accumulate_bbox(ls)
 
@@ -253,6 +273,140 @@ def launch_interactive_viewer(args, xyz, pole_pts, labels, kept_points, kept_lab
             mesh.paint_uniform_color([0.1, 0.6, 1.0])
             scene_widget.scene.add_geometry(f'cyl_{int(cid)}', mesh, make_mesh_material())
             accumulate_bbox(mesh)
+
+    stats_map = {int(stat['id']): stat for stat in cluster_stats}
+    cluster_indices_map = {int(cid): np.where(kept_labels == cid)[0] for cid in np.unique(kept_labels)}
+    cluster_ids_for_pick = []
+    cluster_centroids = []
+    for cid, idx in cluster_indices_map.items():
+        stat = stats_map.get(cid)
+        if stat is None:
+            continue
+        cluster_ids_for_pick.append(int(cid))
+        cluster_centroids.append(np.array(stat['centroid'], dtype=np.float32))
+    if cluster_ids_for_pick:
+        cluster_ids_for_pick = np.asarray(cluster_ids_for_pick, dtype=np.int32)
+        cluster_centroids = np.vstack(cluster_centroids).astype(np.float32)
+    else:
+        cluster_ids_for_pick = np.empty((0,), dtype=np.int32)
+        cluster_centroids = np.empty((0, 3), dtype=np.float32)
+
+    obb_lookup = {int(obb['id']): obb for obb in obbs}
+    highlight_points_name = 'selected_cluster_points'
+    highlight_obb_name = 'selected_cluster_obb'
+    selected_cluster_id = None
+    highlight_color = np.array([1.0, 0.35, 0.0], dtype=np.float32)
+
+    def remove_geometry_if_exists(name):
+        try:
+            scene_widget.scene.remove_geometry(name)
+        except Exception:
+            pass
+
+    def update_info_panel(cluster_id):
+        if cluster_id is None:
+            info_text.text = 'Click a cluster to view details.'
+            return
+        stat = stats_map.get(int(cluster_id))
+        if stat is None:
+            info_text.text = f'Cluster {cluster_id} (no stats)'
+            return
+        lines = [
+            f'Cluster {cluster_id}',
+            f'Height: {stat["height_z"]:.2f} m',
+            f'Points: {stat["num_points"]}',
+            f'Mean prob: {stat["mean_prob"]:.2f}'
+        ]
+        lines.append(f'Z range: {stat["z_min"]:.2f} – {stat["z_max"]:.2f} m')
+        if stat.get('has_obb') and stat.get('obb_extents'):
+            ex, ey, ez = stat['obb_extents']
+            lines.append(f'OBB: {ex:.2f}×{ey:.2f}×{ez:.2f} m')
+        else:
+            lines.append('OBB: n/a')
+        info_text.text = '\n'.join(lines)
+
+    def update_highlight(cluster_id):
+        nonlocal selected_cluster_id
+        if cluster_id == selected_cluster_id:
+            return
+        remove_geometry_if_exists(highlight_points_name)
+        remove_geometry_if_exists(highlight_obb_name)
+        selected_cluster_id = cluster_id
+        if cluster_id is None or cluster_id not in cluster_indices_map:
+            update_info_panel(None)
+            return
+        idx = cluster_indices_map[cluster_id]
+        pts = kept_points[idx]
+        if pts.size > 0:
+            sel_pc = o3d.geometry.PointCloud()
+            sel_pc.points = o3d.utility.Vector3dVector(pts)
+            sel_pc.colors = o3d.utility.Vector3dVector(np.tile(highlight_color, (pts.shape[0], 1)))
+            scene_widget.scene.add_geometry(highlight_points_name, sel_pc, highlight_point_material)
+        obb_info = obb_lookup.get(cluster_id)
+        if obb_info is not None:
+            c = np.array(obb_info['center'], dtype=np.float32)
+            ext = np.array(obb_info['extents'], dtype=np.float32)
+            R = np.array(obb_info['R'], dtype=np.float32)
+            box = o3d.geometry.OrientedBoundingBox(center=c, R=R, extent=ext)
+            pts = np.asarray(box.get_box_points())
+            ls = o3d.geometry.LineSet(
+                points=o3d.utility.Vector3dVector(pts),
+                lines=o3d.utility.Vector2iVector(obb_edges)
+            )
+            ls.colors = o3d.utility.Vector3dVector(np.tile(highlight_color, (obb_edges.shape[0], 1)))
+            scene_widget.scene.add_geometry(highlight_obb_name, ls, highlight_line_material)
+        update_info_panel(cluster_id)
+
+    def pick_cluster_at(x, y):
+        if cluster_centroids.shape[0] == 0:
+            return None
+        frame = scene_widget.frame
+        width = max(1, int(frame.width))
+        height = max(1, int(frame.height))
+        if width <= 0 or height <= 0:
+            return None
+        if x < frame.x or x > (frame.x + frame.width) or y < frame.y or y > (frame.y + frame.height):
+            return None
+        camera = scene_widget.scene.camera
+        try:
+            view = np.asarray(camera.get_view_matrix(), dtype=np.float64)
+            proj = np.asarray(camera.get_projection_matrix(), dtype=np.float64)
+        except Exception:
+            return None
+        pts_h = np.hstack([
+            cluster_centroids.astype(np.float64),
+            np.ones((cluster_centroids.shape[0], 1), dtype=np.float64)
+        ])
+        pts_view = view @ pts_h.T
+        pts_clip = proj @ pts_view
+        pts_clip = pts_clip.T
+        w = pts_clip[:, 3]
+        valid = w > 1e-6
+        if not np.any(valid):
+            return None
+        clip = pts_clip[valid]
+        ids = cluster_ids_for_pick[valid]
+        w = w[valid]
+        ndc = clip[:, :3] / w[:, None]
+        depth_mask = (ndc[:, 2] >= -1.0) & (ndc[:, 2] <= 1.0)
+        if not np.any(depth_mask):
+            return None
+        ndc = ndc[depth_mask]
+        ids = ids[depth_mask]
+        if ndc.shape[0] == 0:
+            return None
+        screen_x = frame.x + (ndc[:, 0] + 1.0) * 0.5 * width
+        screen_y = frame.y + (1.0 - (ndc[:, 1] + 1.0) * 0.5) * height
+        dist2 = (screen_x - x) ** 2 + (screen_y - y) ** 2
+        if dist2.size == 0:
+            return None
+        pick_radius = max(12.0, min(width, height) * 0.035)
+        best = int(np.argmin(dist2))
+        if dist2[best] > pick_radius * pick_radius:
+            return None
+        return int(ids[best])
+
+    update_info_panel(None)
 
     if bbox is not None:
         scene_widget.setup_camera(60.0, bbox, bbox.get_center())
@@ -296,6 +450,10 @@ def launch_interactive_viewer(args, xyz, pole_pts, labels, kept_points, kept_lab
         key_realign = gui.KeyName.R
     except AttributeError:
         key_realign = ord('R')
+    try:
+        key_toggle_info = gui.KeyName.H
+    except AttributeError:
+        key_toggle_info = ord('H')
 
     try:
         EventResult = gui.EventCallbackResult
@@ -313,15 +471,52 @@ def launch_interactive_viewer(args, xyz, pole_pts, labels, kept_points, kept_lab
         except AttributeError:
             return event_ignored()
         down_type = getattr(gui.KeyEvent.Type, 'DOWN', None)
-        if down_type is not None and event_type == down_type and event_key == key_realign:
+        if down_type is not None and event_type != down_type:
+            return event_ignored()
+        handled = False
+        if event_key == key_realign:
             realign_camera_to_world()
+            handled = True
+        elif event_key == key_toggle_info:
+            info_panel.visible = not info_panel.visible
+            window.set_needs_layout()
+            handled = True
+        if handled:
             return event_handled()
         return event_ignored()
 
     window.set_on_key(on_key)
 
+    mouse_button_up_type = getattr(gui.MouseEvent.Type, 'BUTTON_UP', None)
+    left_button_constant = getattr(gui.MouseEvent, 'BUTTON_LEFT', None)
+    if left_button_constant is None and hasattr(gui, 'MouseButton') and hasattr(gui.MouseButton, 'LEFT'):
+        left_button_constant = gui.MouseButton.LEFT
+
+    def on_mouse(event):
+        event_type = getattr(event, 'type', None)
+        if mouse_button_up_type is not None and event_type == mouse_button_up_type:
+            button = getattr(event, 'button', None)
+            if left_button_constant is None or button == left_button_constant:
+                picked = pick_cluster_at(getattr(event, 'x', 0), getattr(event, 'y', 0))
+                update_highlight(picked)
+        return event_ignored()
+
+    if hasattr(scene_widget, 'set_on_mouse'):
+        scene_widget.set_on_mouse(on_mouse)
+
     def on_layout(layout_context):
-        scene_widget.frame = window.content_rect
+        content = window.content_rect
+        scene_widget.frame = content
+        if info_panel.visible:
+            width_pixels = max(content.width, 1)
+            height_pixels = max(content.height, 1)
+            panel_width = min(280, max(200, int(width_pixels * 0.25)))
+            preferred_height = max(140, int(height_pixels * 0.35))
+            max_height = max(height_pixels - 40, 120)
+            panel_height = min(preferred_height, max_height)
+            panel_x = content.x + content.width - panel_width - 16
+            panel_y = content.y + 16
+            info_panel.frame = gui.Rect(panel_x, panel_y, panel_width, panel_height)
 
     window.set_on_layout(on_layout)
 
@@ -595,7 +790,7 @@ def main():
             print(f'Could not save OBB mesh PLY: {e}')
 
     if args.interactive:
-        launch_interactive_viewer(args, xyz, pole_pts, labels, kept_points, kept_labels, obbs, min_points_keep)
+        launch_interactive_viewer(args, xyz, pole_pts, labels, kept_points, kept_labels, obbs, min_points_keep, cluster_stats)
         return
 
     # Optional visualization
